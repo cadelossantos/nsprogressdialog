@@ -4,13 +4,19 @@
  */
 
 /**
- * @date 2025-08-26
- * @version 1.0.0
+ * @date 2026-09-04
+ * @version 1.1.0
  */
 
 define(['N/https'], function (https) {
   const DEFAULT_TITLE = 'Processing...';
   const END_DELAY = 3000;
+  const STAGGER_WINDOW = 300; // ms to spread a single pane-render batch across
+  const MAX_ANIMATED = 200; // pane count above which the list renders virtualized (no cascade)
+  const PANE_HEIGHT = 34; // virtual row height (px); matches .tl-vwindow .tl-pane
+  const RETRY_LIMIT = 3; // consecutive transient failures (exceptions) before rejecting; does NOT count toward maxChecks
+  const REDUCED_MOTION = typeof window !== 'undefined' && !!window.matchMedia &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   let activeInstance = null;
 
@@ -19,6 +25,20 @@ define(['N/https'], function (https) {
     if (className) node.className = className;
     if (text !== undefined && text !== null) node.textContent = text;
     return node;
+  }
+
+  const _checkSvg = (function () {
+    const wrap = document.createElement('span');
+    wrap.innerHTML = `
+      <svg class="tl-pane-dot" viewBox="0 0 640 640" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+        <path d="M320 576C178.6 576 64 461.4 64 320C64 178.6 178.6 64 320 64C461.4 64 576 178.6 576 320C576 461.4 461.4 576 320 576zM438 209.7C427.3 201.9 412.3 204.3 404.5 215L285.1 379.2L233 327.1C223.6 317.7 208.4 317.7 199.1 327.1C189.8 336.5 189.7 351.7 199.1 361L271.1 433C276.1 438 282.9 440.5 289.9 440C296.9 439.5 303.3 435.9 307.4 430.2L443.3 243.2C451.1 232.5 448.7 217.5 438 209.7z"/>
+      </svg>
+    `;
+    return wrap.children[0]; // the <svg> element (skip leading-whitespace text node)
+  })();
+
+  function _checkIcon() {
+    return _checkSvg.cloneNode(true);
   }
 
   function _injectStyles() {
@@ -69,15 +89,39 @@ define(['N/https'], function (https) {
       .tl-mini-bar.tl-fail { background: var(--tl-fail); animation: none; }
       .tl-mini-close { position: absolute; top: 8px; right: 8px; width: 20px; height: 20px; border: none; background: transparent; color: #9ca3af; font-size: 16px; line-height: 1; cursor: pointer; padding: 0; border-radius: 0; display: flex; align-items: center; justify-content: center; }
       .tl-mini-close:hover { background: #eef2f7; color: #111827; }
+
+      .tl-panes { max-height: 160px; overflow-y: auto; }
+      .tl-panes-area { margin-top: 12px; }
+      .tl-panes-count { font-size: 11px; font-weight: 600; color: #6b7280; margin-bottom: 6px; text-align: right; }
+      .tl-pane { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 4px; border: 1px solid #e5e7eb; border-radius: var(--tl-radius); background: #f9fafb; color: var(--tl-accent); font-size: 12px; font-weight: 500; text-decoration: none; cursor: pointer; transition: background .15s, border-color .15s; animation: tl-pane-in .22s ease backwards; }
+      .tl-pane:hover { background: #eff6ff; border-color: var(--tl-accent); }
+      .tl-pane .tl-pane-dot { flex: none; width: 14px; height: 14px; color: var(--tl-accent); }
+      .tl-pane .tl-pane-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .tl-pane.entered { animation: none; }
+      .tl-vspace { overflow: hidden; }
+      .tl-vwindow .tl-pane { height: 34px; box-sizing: border-box; margin: 0; }
+      @keyframes tl-pane-in {
+        from { opacity: 0; transform: translateY(4px); }
+        to   { opacity: 1; transform: none; }
+      }
+
+      .tl-error { margin-top: 12px; border: 1px solid #fca5a5; border-radius: var(--tl-radius); background: #fef2f2; padding: 8px 10px; max-height: 140px; overflow-y: auto; }
+      .tl-error-text { font-size: 12px; line-height: 1.4; color: #b91c1c; white-space: pre-wrap; word-break: break-word; }
+
+      @media (prefers-reduced-motion: reduce) {
+        .tl-pane { animation: none; }
+        .tl-bar, .tl-mini-bar { animation: none; }
+      }
     `;
     document.head.appendChild(style);
   }
 
-  function progressUpdater(options, ui, checks) {
-    checks = checks || 0;
+  function progressUpdater(options, ui) {
     return new Promise(function (resolve, reject) {
-      setTimeout(function () {
-        if (options.stopped || ui.stopped) return; // dialog closed / cleaned up: stop polling
+      let failures = 0; // consecutive exceptions (governed by RETRY_LIMIT)
+      let checks = 0; // successful non-terminal PROCESSING polls (governed by maxChecks)
+      const id = setInterval(function () {
+        if (ui.stopped) { clearInterval(id); return; } // dialog closed / cleaned up: stop polling
         try {
           const res = https.requestSuitelet({
             scriptId: options.suiteletScriptId,
@@ -91,32 +135,41 @@ define(['N/https'], function (https) {
           });
 
           const body = JSON.parse(res.body);
+          failures = 0; // a successful poll resets the transient-failure counter
 
           options.mrTaskId = body.mrTaskId;
           options.status = body.status;
           options.stage = body.stage;
           options.pendingCount = body.pendingCount;
           options.totalCount = body.totalCount;
-          options.processedCount = options.totalCount - options.pendingCount;
+          options.processedCount = Math.max(0, options.totalCount - options.pendingCount);
           options.percentage = body.percentage;
+          if (options.status === 'COMPLETE') options.percentage = 100;
+          options.panes = Array.isArray(body.panes) ? body.panes : (options.panes || []);
+          options.errorMsg = typeof body.errorMsg === 'string' && body.errorMsg ? body.errorMsg : (options.errorMsg || '');
 
           ui.update(options);
 
           if (options.status === 'COMPLETE') {
-            options.percentage = 100;
-            ui.update(options);
+            clearInterval(id);
             resolve();
           } else if (options.status === 'FAILED') {
-            reject(new Error('Backend processing has failed.'));
-          } else if (options.maxChecks && checks + 1 >= options.maxChecks) {
-            reject(new Error('Task check timed out after ' + options.maxChecks + ' attempts.'));
+            clearInterval(id);
+            reject(new Error(options.errorMsg || 'Backend processing has failed.'));
           } else {
-            progressUpdater(options, ui, checks + 1)
-              .then(resolve)
-              .catch(reject);
+            checks++; // successful PROCESSING poll -> counts toward maxChecks timeout
+            if (options.maxChecks && checks >= options.maxChecks) {
+              clearInterval(id);
+              reject(new Error('Task check timed out after ' + options.maxChecks + ' attempts.'));
+            }
           }
         } catch (e) {
-          reject(new Error('An error occurred during progress update: ' + e.message));
+          failures++; // transient exception - governed by RETRY_LIMIT, not counted toward maxChecks
+          if (failures >= RETRY_LIMIT) {
+            clearInterval(id);
+            reject(new Error('An error occurred during progress update: ' + e.message));
+          }
+          // else: transient failure - keep polling on the next tick
         }
       }, 1000);
     });
@@ -126,10 +179,17 @@ define(['N/https'], function (https) {
     let minimized = false;
     let root = null; // backdrop container (modal)
     let mini = null; // lower-right widget
-    let refs = {};
+    let refs = { paneList: [] };
     let cardEl = null;
     let dragStart = null;
     const dragOffset = { x: 0, y: 0 };
+    let countTimers = [];
+    let virtual = false; // this instance renders the pane list windowed (large lists)
+    let onVirtualScroll = null;
+    let vRaf = null; // pending rAF for throttled virtual scroll render
+    let vFrom = -1;
+    let vTo = -1;
+    let vTotal = -1; // last-rendered virtual window (for unchanged-window skip)
 
     function buildModal() {
       root = _el('div', 'tl-backdrop');
@@ -139,9 +199,49 @@ define(['N/https'], function (https) {
 
       const card = _el('div', 'tl-card');
       cardEl = card;
-      const header = _el('div', 'tl-header');
+      card.innerHTML = `
+        <div class="tl-header">
+          <div class="tl-title"></div>
+          ${(options.allowMinimize || options.closable) ? `
+          <div class="tl-controls">
+            ${options.allowMinimize ? '<button type="button" class="tl-btn min-btn" title="Minimize" aria-label="Minimize">\u2500</button>' : ''}
+            ${options.closable ? '<button type="button" class="tl-btn close-btn" title="Close" aria-label="Close">\u2715</button>' : ''}
+          </div>` : ''}
+        </div>
+        <div class="tl-body">
+          ${options.message ? '<p class="tl-message"></p>' : ''}
+          <div class="tl-grid">
+            <div class="tl-cell"><b class="tl-status"></b></div>
+            <div class="tl-cell tl-right"><span class="tl-percent">0%</span></div>
+          </div>
+          <div class="tl-track"><div class="tl-bar"></div></div>
+          <div class="tl-grid tl-grid-bot">
+            <div class="tl-cell"><span class="tl-count">0 of 0</span></div>
+            <div class="tl-cell tl-right stage-cell"><b class="tl-stage"></b></div>
+          </div>
+          <div class="tl-error" style="display:none"><div class="tl-error-text"></div></div>
+          <div class="tl-panes-area" style="display:none"><div class="tl-panes-count"></div><div class="tl-panes"></div></div>
+        </div>
+      `;
+
+      refs.status = card.querySelector('.tl-status');
+      refs.status.textContent = options.status || '';
+      refs.stage = card.querySelector('.tl-stage');
+      refs.percent = card.querySelector('.tl-percent');
+      refs.bar = card.querySelector('.tl-bar');
+      refs.count = card.querySelector('.tl-count');
+      refs.stageCell = card.querySelector('.stage-cell');
+      refs.errBox = card.querySelector('.tl-error');
+      refs.error = card.querySelector('.tl-error-text');
+      refs.panesArea = card.querySelector('.tl-panes-area');
+      refs.panesCount = card.querySelector('.tl-panes-count');
+      refs.panesWrap = card.querySelector('.tl-panes');
+
+      if (options.message) card.querySelector('.tl-message').textContent = options.message;
+      card.querySelector('.tl-title').textContent = options.title;
+
       // drag the modal by its header (ignore clicks on the min/close controls)
-      header.addEventListener('mousedown', function (ev) {
+      card.querySelector('.tl-header').addEventListener('mousedown', function (ev) {
         if (ev.button !== 0) return;
         if (ev.target.closest('button')) return;
         ev.preventDefault();
@@ -152,93 +252,30 @@ define(['N/https'], function (https) {
           offY: dragOffset.y,
         };
       });
-      header.appendChild(_el('div', 'tl-title', options.title));
+      if (options.allowMinimize) card.querySelector('.min-btn').addEventListener('click', minimize);
+      if (options.closable) card.querySelector('.close-btn').addEventListener('click', close);
 
-      const controls = _el('div', 'tl-controls');
-      if (options.allowMinimize) {
-        const minBtn = _el('button', 'tl-btn', '\u2500'); // "─"
-        minBtn.type = 'button';
-        minBtn.title = 'Minimize';
-        minBtn.setAttribute('aria-label', 'Minimize');
-        minBtn.addEventListener('click', minimize);
-        controls.appendChild(minBtn);
-      }
-      if (options.closable) {
-        const closeBtn = _el('button', 'tl-btn', '\u2715'); // "✕"
-        closeBtn.type = 'button';
-        closeBtn.title = 'Close';
-        closeBtn.setAttribute('aria-label', 'Close');
-        closeBtn.addEventListener('click', close);
-        controls.appendChild(closeBtn);
-      }
-      if (controls.childNodes.length) header.appendChild(controls);
-      card.appendChild(header);
-
-      const body = _el('div', 'tl-body');
-      if (options.message) body.appendChild(_el('p', 'tl-message', options.message));
-
-      refs.status = _el('b');
-      refs.status.textContent = options.status || '';
-      refs.stage = _el('b');
-
-      // top row: status | percentage
-      const topGrid = _el('div', 'tl-grid');
-      const tL = _el('div', 'tl-cell');
-      tL.appendChild(refs.status);
-      const tR = _el('div', 'tl-cell tl-right');
-      refs.percent = _el('span', 'tl-percent');
-      refs.percent.textContent = '0%';
-      tR.appendChild(refs.percent);
-      topGrid.appendChild(tL);
-      topGrid.appendChild(tR);
-      body.appendChild(topGrid);
-
-      // progress bar
-      const track = _el('div', 'tl-track');
-      refs.bar = _el('div', 'tl-bar');
-      track.appendChild(refs.bar);
-      body.appendChild(track);
-
-      // bottom row: item count | stage
-      const botGrid = _el('div', 'tl-grid tl-grid-bot');
-      const bL = _el('div', 'tl-cell');
-      refs.count = _el('span', 'tl-count', '0 of 0');
-      bL.appendChild(refs.count);
-      const bR = _el('div', 'tl-cell tl-right');
-      bR.appendChild(refs.stage);
-      refs.stageCell = bR;
-      botGrid.appendChild(bL);
-      botGrid.appendChild(bR);
-      body.appendChild(botGrid);
-
-      card.appendChild(body);
       root.appendChild(card);
     }
 
     function buildMini() {
       mini = _el('div', 'tl-mini');
       mini.id = 'tl_mini';
+      mini.innerHTML = `
+        <div class="tl-mini-label"></div>
+        <div class="tl-mini-track"><div class="tl-mini-bar" style="width:0%"></div></div>
+        ${options.closable ? '<button type="button" class="tl-mini-close" aria-label="Close">\u2715</button>' : ''}
+      `;
       mini.addEventListener('click', restore);
-
-      const label = _el('div', 'tl-mini-label', options.title);
-      mini.appendChild(label);
-
-      const track = _el('div', 'tl-mini-track');
-      refs.miniBarInner = _el('div', 'tl-mini-bar');
-      refs.miniBarInner.style.width = '0%';
-      track.appendChild(refs.miniBarInner);
-      mini.appendChild(track);
+      mini.querySelector('.tl-mini-label').textContent = options.title;
+      refs.miniBarInner = mini.querySelector('.tl-mini-bar');
 
       // small close on the widget (only when closable)
       if (options.closable) {
-        const mc = _el('button', 'tl-mini-close', '\u2715');
-        mc.type = 'button';
-        mc.setAttribute('aria-label', 'Close');
-        mc.addEventListener('click', function (e) {
+        mini.querySelector('.tl-mini-close').addEventListener('click', function (e) {
           e.stopPropagation();
           close();
         });
-        mini.appendChild(mc);
       }
     }
 
@@ -283,7 +320,148 @@ define(['N/https'], function (https) {
         refs.percent.classList.remove('tl-done');
         refs.percent.classList.remove('tl-fail');
       }
+
+      if (Array.isArray(o.panes)) renderPanes(o.panes);
+
+      if (o.errorMsg) {
+        refs.error.textContent = o.errorMsg;
+        refs.errBox.style.display = '';
+      }
     };
+
+    // Render record panes only - never touches status, percentage, count, or bar.
+    this.addPanes = function (panes) {
+      if (Array.isArray(panes)) renderPanes(panes);
+    };
+
+    function renderPanes(panes) {
+      if (!refs.panesWrap) return; // instance has been cleaned up
+      refs.panesRenderedSet = refs.panesRenderedSet || new Set();
+      const seen = new Set();
+      const batch = [];
+      panes.forEach(function (p) {
+        if (!p || !p.url) return;
+        if (refs.panesRenderedSet.has(p.url) || seen.has(p.url)) return;
+        seen.add(p.url);
+        batch.push(p);
+      });
+      const m = batch.length;
+      const base = refs.paneList.length; // count already rendered before this batch
+      // maintain the ordered list + dedup set
+      batch.forEach(function (p) {
+        refs.panesRenderedSet.add(p.url);
+        refs.paneList.push(p);
+      });
+
+      if (!refs.paneList.length) {
+        refs.panesArea.style.display = 'none';
+        countTimers.forEach(clearTimeout);
+        countTimers = [];
+        return;
+      }
+      refs.panesArea.style.display = '';
+
+      // large list: switch to virtualized (windowed) rendering once
+      if (!virtual && refs.paneList.length > MAX_ANIMATED) switchToVirtual();
+      if (virtual) { renderVirtual(); return; }
+
+      if (m === 0) {
+        // No new panes this call: refresh the label only while nothing is mid-cascade.
+        if (!countTimers.length && refs.panesCount) refs.panesCount.textContent = 'Count: ' + base;
+        return;
+      }
+
+      if (refs.panesCount) refs.panesCount.textContent = 'Count: ' + base;
+      const rows = batch.map(buildPaneRow);
+
+      if (REDUCED_MOTION) {
+        // no animations wanted: insert the whole batch now with the final count
+        rows.forEach(function (row) {
+          if (refs.panesWrap) refs.panesWrap.appendChild(row);
+        });
+        if (refs.panesCount) refs.panesCount.textContent = 'Count: ' + refs.paneList.length;
+        return;
+      }
+
+      // defer insertion so the container height/scrollbar grows one row at a time with the reveal
+      for (let i = 0; i < m; i++) {
+        const delay = m > 1 ? Math.round((i / (m - 1)) * STAGGER_WINDOW) : 0;
+        const val = base + (i + 1);
+        let t = setTimeout(function () {
+          const idx = countTimers.indexOf(t);
+          if (idx > -1) countTimers.splice(idx, 1);
+          const row = rows[i];
+          if (refs.panesWrap) refs.panesWrap.appendChild(row);
+          if (refs.panesCount) refs.panesCount.textContent = 'Count: ' + val;
+          row.addEventListener('animationend', function () {
+            row.classList.add('entered'); // freeze final state; no replay on re-attach
+          }, { once: true });
+        }, delay);
+        countTimers.push(t);
+      }
+    }
+
+    function buildPaneRow(p) {
+      const row = _el('a', 'tl-pane');
+      row.href = p.url;
+      row.target = '_blank';
+      row.rel = 'noopener noreferrer';
+      row.appendChild(_checkIcon());
+      row.appendChild(_el('span', 'tl-pane-text', p.text || p.url));
+      return row;
+    }
+
+    function switchToVirtual() {
+      countTimers.forEach(clearTimeout);
+      countTimers = [];
+      virtual = true;
+      // single wipe: drop any appended small-mode rows, then lay the persistent scaffold
+      refs.panesWrap.innerHTML = '';
+      refs.vTop = _el('div', 'tl-vspace');
+      refs.vWin = _el('div', 'tl-vwindow');
+      refs.vBot = _el('div', 'tl-vspace');
+      refs.panesWrap.appendChild(refs.vTop);
+      refs.panesWrap.appendChild(refs.vWin);
+      refs.panesWrap.appendChild(refs.vBot);
+      if (!onVirtualScroll) {
+        onVirtualScroll = function () {
+          if (vRaf) return;
+          vRaf = requestAnimationFrame(function () {
+            vRaf = null;
+            renderVirtual();
+          });
+        };
+        refs.panesWrap.addEventListener('scroll', onVirtualScroll);
+      }
+      renderVirtual();
+    }
+
+    function renderVirtual() {
+      if (!refs.panesWrap || !virtual) return;
+      const total = refs.paneList.length;
+      if (!total) return;
+      const H = PANE_HEIGHT;
+      const ch = refs.panesWrap.clientHeight || 160;
+      const st = refs.panesWrap.scrollTop || 0;
+      const from = Math.max(0, Math.floor(st / H) - 3);
+      const to = Math.min(total, Math.ceil((st + ch) / H) + 3);
+      // skip if the window has not changed (avoids needless row rebuild on tiny scrolls/re-fires)
+      if (vFrom === from && vTo === to && vTotal === total) return;
+      vFrom = from;
+      vTo = to;
+      vTotal = total;
+      // spacers persist, so the content height (total*H) and scrollTop stay stable across scrolls
+      refs.vTop.style.height = (from * H) + 'px';
+      refs.vBot.style.height = ((total - to) * H) + 'px';
+      const win = refs.vWin;
+      win.innerHTML = ''; // swap only the window rows
+      for (let i = from; i < to; i++) {
+        const row = buildPaneRow(refs.paneList[i]);
+        row.classList.add('entered'); // no animation in virtual mode
+        win.appendChild(row);
+      }
+      if (refs.panesCount) refs.panesCount.textContent = 'Count: ' + total;
+    }
 
     this.finalize = function (status) {
       // ensure the right final color (+ keep widget/mini in sync) even if minimized
@@ -293,6 +471,7 @@ define(['N/https'], function (https) {
         stage: options.stage,
         processedCount: options.processedCount,
         totalCount: options.totalCount,
+        errorMsg: options.errorMsg,
       };
       this.update(o);
     };
@@ -313,11 +492,13 @@ define(['N/https'], function (https) {
     }
 
     function close() {
+      const cb = this._cancelCb;
+      this._cancelCb = null;
       cleanup();
-      if (options.redirectTo) {
-        window.location = options.redirectTo;
-      } else {
-        window.location.reload();
+      if (typeof cb === 'function') {
+        const err = new Error('Dialog closed before completion.');
+        err.canceled = true; // consumer marker: distinguish early-close from a real failure
+        cb(err); // rejects the pending create() promise (no-op if already settled)
       }
     }
 
@@ -335,6 +516,15 @@ define(['N/https'], function (https) {
       document.removeEventListener('mouseup', onDragUp);
       cardEl = null;
       dragStart = null;
+      countTimers.forEach(clearTimeout);
+      countTimers = [];
+      if (onVirtualScroll && refs.panesWrap) {
+        refs.panesWrap.removeEventListener('scroll', onVirtualScroll);
+        onVirtualScroll = null;
+      }
+      if (vRaf) { cancelAnimationFrame(vRaf); vRaf = null; }
+      vFrom = vTo = vTotal = -1;
+      virtual = false;
       refs = {};
       activeInstance = null;
     }
@@ -357,6 +547,110 @@ define(['N/https'], function (https) {
     this.stopped = false;
     this.close = close;
     this.cleanup = cleanup;
+    this._cancelCb = null;
+    this.onCancel = function (fn) { this._cancelCb = fn; };
+  }
+
+  /**
+   * Shared end-of-processing flow: for non-closable + autoclose, auto-cleanup the modal
+   * after END_DELAY; otherwise keep the final colored state. No navigation - the consumer
+   * owns reload/redirect via the resolved/rejected promise (or its own controller calls).
+   * @private
+   */
+  function endFlow(options, ui, cb) {
+    if (!options.closable && options.autoclose) {
+      setTimeout(function () {
+        ui.cleanup();
+        cb && cb();
+      }, END_DELAY);
+    } else {
+      // non-closable w/o autoclose, or closable: keep final color until user closes
+      cb && cb();
+    }
+  }
+
+  /**
+   * Returns the manual-mode controller. No polling; the caller feeds progress via
+   * update() and signals completion via complete()/fail().
+   * @private
+   */
+  function manualController(options, ui) {
+    const last = {
+      processed: 0,
+      total: 100,
+      panes: Array.isArray(options.panes) ? options.panes : [],
+      errorMsg: '',
+    };
+    const payload = function (status, pct) {
+      const o = {
+        status: status,
+        percentage: pct,
+        processedCount: last.processed,
+        totalCount: last.total,
+      };
+      if (last.panes && last.panes.length) o.panes = last.panes;
+      if (last.errorMsg) o.errorMsg = last.errorMsg;
+      return o;
+    };
+    const currentPct = function () {
+      return last.total > 0 ? Math.round((last.processed / last.total) * 100) : 0;
+    };
+    return {
+      /**
+       * Update progress from a count. Percentage is auto-computed.
+       * @param {Object} data
+       * @param {number} [data.processed] - Items processed (default 0).
+       * @param {number} [data.total] - Total items (default 100).
+       * @param {Array} [data.panes] - Replace the list of {url, text} record panes.
+       * @param {string} [data.errorMsg] - Error message to show in the error box.
+       */
+      update: function (data) {
+        data = data || {};
+        last.processed = data.processed == null ? 0 : data.processed;
+        last.total = data.total == null ? 100 : data.total;
+        if (Array.isArray(data.panes)) last.panes = data.panes;
+        if (typeof data.errorMsg === 'string') last.errorMsg = data.errorMsg;
+        ui.update(payload('PROCESSING', currentPct()));
+      },
+      /** Mark as complete (green), then run the end flow. */
+      complete: function (data) {
+        data = data || {};
+        if (Array.isArray(data.panes)) last.panes = data.panes;
+        if (typeof data.errorMsg === 'string') last.errorMsg = data.errorMsg;
+        ui.update(payload('COMPLETE', 100));
+        endFlow(options, ui);
+      },
+      /** Mark as failed (red), then run the end flow. */
+      fail: function (data) {
+        data = data || {};
+        if (Array.isArray(data.panes)) last.panes = data.panes;
+        if (typeof data.errorMsg === 'string') last.errorMsg = data.errorMsg;
+        ui.update(payload('FAILED', currentPct()));
+        endFlow(options, ui);
+      },
+      /** Append record panes without changing status or percentage; re-renders them. */
+      addPanes: function (panes) {
+        if (!Array.isArray(panes) || !panes.length) return;
+        last.panes = last.panes.concat(panes);
+        ui.addPanes(last.panes);
+      },
+      /** Close immediately: dismiss the dialog (no navigation - consumer owns it). */
+      close: function () {
+        ui.close();
+      },
+    };
+  }
+
+  function _normalizePanes(panes) {
+    if (!Array.isArray(panes)) return [];
+    const out = [];
+    panes.forEach(function (p) {
+      if (!p || typeof p !== 'object') return;
+      const url = p.url;
+      if (typeof url !== 'string' || !url) return;
+      out.push({ url: url, text: typeof p.text === 'string' && p.text ? p.text : url });
+    });
+    return out;
   }
 
   /**
@@ -373,7 +667,7 @@ define(['N/https'], function (https) {
    * @param {boolean} [options.closable] - Show close button. Default false.
    * @param {boolean} [options.allowMinimize] - Show minimize button. Default false.
    * @param {boolean} [options.autoclose] - Auto-close ~3s after COMPLETE/FAILED (non-closable). Default true.
-   * @param {string} [options.redirectTo] - URL to navigate to on close; empty reloads the page.
+   * @param {Object[]} [options.panes] - Initial list of {url, text} record panes (manual mode).
    * @param {string} [options.suiteletScriptId]
    * @param {string} [options.suiteletDeploymentId]
    * @param {Object} [options.data]
@@ -392,7 +686,6 @@ define(['N/https'], function (https) {
     options.allowMinimize = options.allowMinimize === true;
     options.autoclose = options.autoclose !== false;
     options.title = options.title || DEFAULT_TITLE;
-    options.redirectTo = options.redirectTo || '';
 
     // Manual mode: no Suitelet ids - client script drives the loader.
     const manualMode = !options.suiteletScriptId || !options.suiteletDeploymentId;
@@ -406,12 +699,15 @@ define(['N/https'], function (https) {
     }
 
     return new Promise(function (resolve, reject) {
+      ui.onCancel(reject);
+
       progressUpdater(options, ui)
         .then(function () {
           ui.finalize('complete');
           endFlow(options, ui, resolve);
         })
         .catch(function (err) {
+          if (!options.errorMsg) options.errorMsg = err.message;
           ui.finalize('failed');
           if (options.closable) {
             // closable modal shows final red state; user closes it.
@@ -426,90 +722,16 @@ define(['N/https'], function (https) {
   }
 
   /**
-   * Shared end-of-processing flow: auto-close (non-closable + autoclose), else keep
-   * the final colored state and resolve/settle via cb. Runs redirect/reload when it closes.
-   * @private
-   */
-  function endFlow(options, ui, cb) {
-    if (!options.closable && options.autoclose) {
-      setTimeout(function () {
-        ui.cleanup();
-        if (options.redirectTo) {
-          window.location = options.redirectTo;
-        } else {
-          window.location.reload();
-        }
-        cb && cb();
-      }, END_DELAY);
-    } else {
-      // non-closable w/o autoclose, or closable: keep final color until user closes
-      cb && cb();
-    }
-  }
-
-  /**
-   * Returns the manual-mode controller. No polling; the caller feeds progress via
-   * update() and signals completion via complete()/fail().
-   * @private
-   */
-  function manualController(options, ui) {
-    const last = { processed: 0, total: 100 };
-    return {
-      /**
-       * Update progress from a count. Percentage is auto-computed.
-       * @param {Object} data
-       * @param {number} [data.processed] - Items processed (default 0).
-       * @param {number} [data.total] - Total items (default 100).
-       */
-      update: function (data) {
-        data = data || {};
-        last.processed = data.processed == null ? 0 : data.processed;
-        last.total = data.total == null ? 100 : data.total;
-        const pct = last.total > 0 ? Math.round((last.processed / last.total) * 100) : 0;
-        ui.update({
-          status: 'PROCESSING',
-          percentage: pct,
-          processedCount: last.processed,
-          totalCount: last.total,
-        });
-      },
-      /** Mark as complete (green), then run the end flow. */
-      complete: function () {
-        ui.update({
-          status: 'COMPLETE',
-          percentage: 100,
-          processedCount: last.processed,
-          totalCount: last.total,
-        });
-        endFlow(options, ui);
-      },
-      /** Mark as failed (red), then run the end flow. */
-      fail: function () {
-        const pct = last.total > 0 ? Math.round((last.processed / last.total) * 100) : 0;
-        ui.update({
-          status: 'FAILED',
-          percentage: pct,
-          processedCount: last.processed,
-          totalCount: last.total,
-        });
-        endFlow(options, ui);
-      },
-      /** Close immediately: cleanup + redirect/reload per redirectTo. */
-      close: function () {
-        ui.close();
-      },
-    };
-  }
-
-  /**
    * Builds the JSON payload a Suitelet returns so the client can update progress.
    * @param {module} taskModule - The N/task module.
    * @param {string} mrTaskId - Task ID generated from execution
    * @param {string} suiteletScriptId - Suitelet Script String ID
    * @param {string} suiteletDeploymentId - Suitelet Deployment String ID
+   * @param {Object[]} [resultRecords] - Optional list of {url, text} record panes to echo to the client.
+   * @param {string} [errorMsg] - Optional error message to echo to the client (shown in the error box on failure).
    * @returns {Object}
    */
-  function statusCheck(taskModule, mrTaskId, suiteletScriptId, suiteletDeploymentId) {
+  function statusCheck(taskModule, mrTaskId, suiteletScriptId, suiteletDeploymentId, resultRecords, errorMsg) {
     const taskStatus = taskModule.checkStatus(mrTaskId);
     const status = taskStatus.status;
     const stage = taskStatus.stage;
@@ -523,7 +745,7 @@ define(['N/https'], function (https) {
       pendingCount = taskStatus.getPendingReduceCount();
       totalCount = taskStatus.getTotalReduceCount();
     }
-    const processedCount = totalCount - pendingCount;
+    const processedCount = Math.max(0, totalCount - pendingCount);
     const percentage = taskStatus.getPercentageCompleted();
 
     return {
@@ -534,6 +756,8 @@ define(['N/https'], function (https) {
       totalCount: totalCount,
       processedCount: processedCount,
       percentage: percentage,
+      panes: _normalizePanes(resultRecords),
+      errorMsg: typeof errorMsg === 'string' ? errorMsg : '',
       suiteletScriptId: suiteletScriptId,
       suiteletDeploymentId: suiteletDeploymentId,
     };

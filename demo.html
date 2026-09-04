@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NS Progress Dialog - Browser Simulator (Record Panes)</title>
+<style>
+  body { font: 14px/1.5 "Segoe UI", sans-serif; margin: 0; background: #f3f4f6; color: #111827; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 32px 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: #6b7280; margin: 0 0 20px; font-size: 13px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .btn {
+    display: inline-block; padding: 8px 14px; border: 1px solid #0f8cf9; border-radius: 6px;
+    background: #0f8cf9; color: #fff; font-weight: 600; font-size: 13px; cursor: pointer; margin: 4px 8px 4px 0;
+  }
+  .btn.alt { background: #fff; color: #0f8cf9; }
+  code, pre { background: #f3f4f6; border-radius: 4px; padding: 2px 5px; font-size: 12px; }
+  pre { padding: 12px; overflow-x: auto; white-space: pre-wrap; }
+  .hint { font-size: 12px; color: #6b7280; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <h1>NS Progress Dialog &mdash; Record Panes simulator</h1>
+  <p class="sub">
+    Runs the real <code>nsprogressdialog.js</code> in the browser with a mocked <code>N/https</code>.
+    Record panes append mid-process and at completion; clicking a pane opens the record URL.
+  </p>
+
+  <div class="card">
+    <h2>Auto (Suitelet poll) mode</h2>
+    <button class="btn" onclick="runAuto()">Run Auto mode</button>
+    <button class="btn alt" onclick="runAutoFail()">Run Auto (fail + errorMsg)</button>
+    <button class="btn alt" onclick="closeAll()">Close current</button>
+    <p class="hint">Mock suitelet returns a timed sequence: PROCESSING (panes appended over steps) then COMPLETE with the full list. The failure variant ends FAILED and shows the red error box.</p>
+  </div>
+
+  <div class="card">
+    <h2>Manual (controller) mode</h2>
+    <button class="btn" onclick="runManual()">Run Manual mode</button>
+    <button class="btn alt" onclick="runManualFail()">Run Manual (fail + errorMsg)</button>
+    <button class="btn alt" onclick="closeAll()">Close current</button>
+    <p class="hint">Controller is driven with <code>update({processed,total,panes})</code> and <code>addPanes()</code>; the success variant ends with <code>complete()</code>, the failure variant with <code>fail({ errorMsg })</code> to show the red error box.</p>
+  </div>
+
+  <div class="card">
+    <h2>Streaming (load per pane)</h2>
+    <button class="btn" onclick="runStream()">Run Streaming demo</button>
+    <button class="btn alt" onclick="closeAll()">Close current</button>
+    <p class="hint">Streams one pane per tick up to 200 (animated cascade, count +1 each), then fills to
+      <code>Count: 2000</code> and flips to the virtualized windowed list.</p>
+  </div>
+
+  <div class="card">
+    <h2>Virtualized list (2000 rows)</h2>
+    <button class="btn" onclick="runLarge()">Run 2000-row demo</button>
+    <button class="btn alt" onclick="closeAll()">Close current</button>
+    <p class="hint">Pane count exceeds <code>MAX_ANIMATED</code> (200) - the list renders virtualized:
+      only ~6 rows exist in the DOM with top/bottom spacers; scroll through all 2,000.</p>
+  </div>
+
+  <div class="card">
+    <h2>statusCheck() payload demo</h2>
+    <button class="btn" onclick="statusCheckDemo()">statusCheck(..., resultRecords)</button>
+    <pre id="statusOut">(click the button)</pre>
+    <p class="hint">Server-side helper with an added <code>resultRecords</code> list; the returned payload now includes <code>panes</code>.</p>
+  </div>
+</div>
+
+<script>
+  /* ---------- Minimal AMD shim so nsprogressdialog.js loads in the browser ---------- */
+  window.__autoStep = 0;
+  window.__manualTimer = null;
+
+  // Generates count record panes ({ url, text }) for the sample.
+  window.makePanes = function (count) {
+    var out = [], i;
+    for (i = 1; i <= count; i++) {
+      out.push({ url: '/app/record/salesorder/' + (1000 + i), text: 'Sales Order #' + (1000 + i) });
+    }
+    return out;
+  };
+
+  // Generates a single pane ({ url, text }) for the streaming demo.
+  window.makePane = function (n) {
+    return { url: '/app/record/salesorder/' + (2000 + n), text: 'Sales Order #' + (2000 + n) };
+  };
+
+  // A realistic, longer NetSuite Map/Reduce error, rendered as pretty-printed JSON.
+  window.netsuiteErrorSample = function () {
+    return JSON.stringify({
+      type: 'error.SuiteScriptError',
+      name: 'SSS_INVALID_INTERNAL_ID',
+      message: "You have entered an Invalid Internal Id. Please enter a valid Internal Id for field 'entityid' that you wish to associate with this transaction.",
+      notBeforeCommit: false,
+      filename: 'SuiteScripts/mr_record_export.js',
+      lineNum: 128,
+      stack: [
+        'Error: You have entered an Invalid Internal Id. Please enter a valid Internal Id for field \'entityid\' that you wish to associate with this transaction.',
+        "    at <anonymous>:SuiteScripts/mr_record_export.js:128:11",
+        '    at mapContext.write (N/task.js:map:write)',
+        '    at Object.mapKey (SuiteScripts/mr_record_export.js:97:17)',
+        '    at Object.mapCallBack (SuiteScripts/mr_record_export.js:63:9)',
+        '    at Object.runMapStageFromScript (SuiteScripts/mr_record_export.js:31:5)',
+        '    at runScript'
+      ],
+      cause: {
+        type: 'error.SuiteScriptError',
+        name: 'SSS_INVALID_INTERNAL_ID',
+        message: 'no internal id provided'
+      }
+    }, null, 2);
+  };
+
+  // Mock N/https used by the module in auto mode.
+  window.__UseFail = false;
+  window.__MockHttps = {
+    requestSuitelet: function (opts) {
+      var step = window.__autoStep++;
+      var payloads = window.__UseFail ? window.__AutoFailPayloads : window.__AutoPayloads;
+      var body = payloads[Math.min(step, payloads.length - 1)];
+      // echo the same shape the real Suitelet would after calling statusCheck()
+      return { status: 200, body: JSON.stringify(body) };
+    }
+  };
+
+  // Timed sequence returned by the mock suitelet across successive polls.
+  window.__AutoPayloads = [
+    { status: 'PROCESSING', stage: 'MAP', pendingCount: 18, totalCount: 20,
+      percentage: 10, mrTaskId: 'MR-demo', panes: [] },
+    { status: 'PROCESSING', stage: 'MAP', pendingCount: 13, totalCount: 20,
+      percentage: 35, mrTaskId: 'MR-demo', panes: makePanes(10) },
+    { status: 'PROCESSING', stage: 'REDUCE', pendingCount: 6, totalCount: 20,
+      percentage: 70, mrTaskId: 'MR-demo', panes: makePanes(40) },
+    { status: 'COMPLETE', stage: 'REDUCE', pendingCount: 0, totalCount: 20,
+      percentage: 100, mrTaskId: 'MR-demo', panes: makePanes(100) }
+  ];
+
+  // Failure sequence: PROCESSING -> FAILED with an errorMsg.
+  window.__AutoFailPayloads = [
+    { status: 'PROCESSING', stage: 'MAP', pendingCount: 18, totalCount: 20,
+      percentage: 10, mrTaskId: 'MR-fail', panes: [] },
+    { status: 'PROCESSING', stage: 'REDUCE', pendingCount: 6, totalCount: 20,
+      percentage: 70, mrTaskId: 'MR-fail', panes: makePanes(5) },
+    { status: 'FAILED', stage: 'REDUCE', pendingCount: 3, totalCount: 20,
+      percentage: 85, mrTaskId: 'MR-fail', panes: makePanes(5),
+      errorMsg: netsuiteErrorSample() }
+  ];
+
+  window.define = function (deps, factory) {
+    var mods = deps.map(function (d) {
+      if (d === 'N/https') return window.__MockHttps;
+      throw new Error('Unknown dependency in demo: ' + d);
+    });
+    window.__nsprogressdialog = factory.apply(null, mods);
+  };
+</script>
+
+<script src="nsprogressdialog.js"></script>
+
+<script>
+  var nsprogressdialog = window.__nsprogressdialog;
+
+  function closeAll() {
+    if (window.__manualTimer) { clearInterval(window.__manualTimer); window.__manualTimer = null; }
+    if (window.__streamTimer) { clearInterval(window.__streamTimer); window.__streamTimer = null; }
+    // A running auto promise keeps polling, so start a fresh one to replace/clean it up later;
+    // simplest: rely on activeInstance cleanup on the next create(). For an idle demo, nop.
+  }
+
+  // ---------------- Auto mode ----------------
+  function runAuto() {
+    window.__UseFail = false;
+    window.__autoStep = 0;
+    nsprogressdialog.create({
+      title: 'Auto mode - Processing records',
+      message: 'Mock suitelet polls appending record panes. Click a pane to open it in a new tab.',
+      closable: true,
+      allowMinimize: true,
+      autoclose: false,
+      suiteletScriptId: 'customscript_mock',
+      suiteletDeploymentId: 'customdeploy_mock'
+    }).then(function () {
+      window.__autoStep = 99; // stop further mock polls from yielding new panes
+      console.log('create() resolved (COMPLETE) - consumer would reload/navigate here');
+    }).catch(function (err) {
+      if (err.canceled) {
+        console.warn('Dialog closed early (canceled):', err.message);
+      } else {
+        alert('Auto mode failed: ' + err.message);
+      }
+    });
+  }
+
+  // ---------------- Auto failure mode ----------------
+  function runAutoFail() {
+    window.__UseFail = true;
+    window.__autoStep = 0;
+    nsprogressdialog.create({
+      title: 'Auto failure demo',
+      message: 'Mock suitelet ends in FAILED with an errorMsg rendered in the red box.',
+      closable: true,
+      allowMinimize: true,
+      autoclose: false,
+      suiteletScriptId: 'customscript_mock',
+      suiteletDeploymentId: 'customdeploy_mock'
+    }).then(function () {
+      // completion not expected for the failure sequence
+    }).catch(function (err) {
+      if (err.canceled) {
+        console.warn('Auto failure dialog closed early (canceled):', err.message);
+      } else {
+        console.log('create() rejected (FAILED):', err.message);
+      }
+    });
+  }
+
+  // ---------------- Manual mode ----------------
+  function runManual() {
+    if (window.__manualTimer) { clearInterval(window.__manualTimer); window.__manualTimer = null; }
+
+    var loader = nsprogressdialog.create({
+      title: 'Manual mode - Updating records',
+      closable: true,
+      autoclose: false
+    });
+
+    var processed = 0, total = 20;
+    var step = 0;
+    window.__manualTimer = setInterval(function () {
+      step++;
+      processed = Math.min(total, processed + 4);
+      if (step === 2) loader.addPanes(makePanes(10));
+      if (step === 3) loader.update({ processed: processed, total: total, panes: makePanes(40) });
+      loader.update({ processed: processed, total: total });
+      if (processed >= total) {
+        clearInterval(window.__manualTimer);
+        window.__manualTimer = null;
+        loader.complete({ panes: makePanes(100) });
+      }
+    }, 700);
+  }
+
+  // ---------------- Manual failure mode ----------------
+  function runManualFail() {
+    if (window.__manualTimer) { clearInterval(window.__manualTimer); window.__manualTimer = null; }
+
+    var loader = nsprogressdialog.create({
+      title: 'Manual failure demo',
+      message: 'Controller drives to fail({ errorMsg }) - red box + appended panes.',
+      closable: true,
+      autoclose: false
+    });
+
+    var processed = 0, total = 20;
+    var step = 0;
+    window.__manualTimer = setInterval(function () {
+      step++;
+      processed = Math.min(total, processed + 4);
+      if (step === 2) loader.addPanes(makePanes(5));
+      loader.update({ processed: processed, total: total });
+      if (processed >= total) {
+        clearInterval(window.__manualTimer);
+        window.__manualTimer = null;
+        loader.fail({ errorMsg: netsuiteErrorSample() });
+      }
+    }, 700);
+  }
+
+  // ---------------- Large virtualized list demo --------------
+  function runLarge() {
+    nsprogressdialog.create({
+      title: '2000 panes - virtualized list',
+      message: 'Renders only the visible window (~6 rows) with spacers; scroll through all 2000.',
+      closable: true,
+      autoclose: false
+    }).complete({ panes: makePanes(2000) }); // manual mode -> controller -> complete()
+  }
+
+  // ---------------- Streaming per-pane load/render demo (to 2000, virtualizes) --------------
+  function runStream() {
+    if (window.__streamTimer) { clearInterval(window.__streamTimer); window.__streamTimer = null; }
+    var loader = nsprogressdialog.create({
+      title: 'Streaming (2000) - animates 1-by-1, then virtualizes',
+      message: 'Streams one pane per tick up to 200 (animated cascade), then fills to 2000 (virtualized window).',
+      closable: true,
+      autoclose: false
+    });
+    var added = 0, ANIM = 200, TOTAL = 2000;
+    window.__streamTimer = setInterval(function () {
+      if (added < ANIM) {
+        added++;
+        loader.addPanes([ makePane(added) ]); // 1-by-1 animated cascade
+      } else {
+        clearInterval(window.__streamTimer);
+        window.__streamTimer = null;
+        var batch = [];
+        while (added < TOTAL) { added++; batch.push(makePane(added)); }
+        loader.addPanes(batch); // large batch -> paneList 200->2000, virtualized fill
+        loader.complete();
+      }
+    }, 60); // ~60ms/pane -> ~12s animated phase (tuning constant)
+  }
+
+  // ---------------- statusCheck() payload demo ----------------
+  function statusCheckDemo() {
+    var task = {
+      checkStatus: function () {
+        return {
+          status: 'COMPLETE',
+          stage: 'REDUCE',
+          getPendingMapCount: function () { return 0; },
+          getTotalMapCount: function () { return 0; },
+          getPendingReduceCount: function () { return 0; },
+          getTotalReduceCount: function () { return 3; },
+          getPercentageCompleted: function () { return 100; }
+        };
+      }
+    };
+    var payload = nsprogressdialog.statusCheck(
+      task, 'MR-record-1', 'customscript_mock', 'customdeploy_mock',
+      makePanes(5),
+      netsuiteErrorSample()
+    );
+    document.getElementById('statusOut').textContent = JSON.stringify(payload, null, 2);
+  }
+</script>
+</body>
+</html>
