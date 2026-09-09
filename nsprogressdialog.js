@@ -15,7 +15,9 @@ define(['N/https'], function (https) {
   const MAX_ANIMATED = 200; // pane count above which the list renders virtualized (no cascade)
   const PANE_HEIGHT = 34; // virtual row height (px); matches .tl-vwindow .tl-pane
   const RETRY_LIMIT = 3; // consecutive transient failures (exceptions) before rejecting; does NOT count toward maxChecks
-  const REDUCED_MOTION = typeof window !== 'undefined' && !!window.matchMedia &&
+  const REDUCED_MOTION =
+    typeof window !== 'undefined' &&
+    !!window.matchMedia &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   let activeInstance = null;
@@ -27,17 +29,20 @@ define(['N/https'], function (https) {
     return node;
   }
 
-  const _checkSvg = (function () {
+  let _checkSvg = null;
+
+  function _buildCheckSvg() {
     const wrap = document.createElement('span');
     wrap.innerHTML = `
       <svg class="tl-pane-dot" viewBox="0 0 640 640" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
         <path d="M320 576C178.6 576 64 461.4 64 320C64 178.6 178.6 64 320 64C461.4 64 576 178.6 576 320C576 461.4 461.4 576 320 576zM438 209.7C427.3 201.9 412.3 204.3 404.5 215L285.1 379.2L233 327.1C223.6 317.7 208.4 317.7 199.1 327.1C189.8 336.5 189.7 351.7 199.1 361L271.1 433C276.1 438 282.9 440.5 289.9 440C296.9 439.5 303.3 435.9 307.4 430.2L443.3 243.2C451.1 232.5 448.7 217.5 438 209.7z"/>
       </svg>
     `;
-    return wrap.children[0]; // the <svg> element (skip leading-whitespace text node)
-  })();
+    return wrap.children[0];
+  }
 
   function _checkIcon() {
+    if (!_checkSvg) _checkSvg = _buildCheckSvg();
     return _checkSvg.cloneNode(true);
   }
 
@@ -121,7 +126,10 @@ define(['N/https'], function (https) {
       let failures = 0; // consecutive exceptions (governed by RETRY_LIMIT)
       let checks = 0; // successful non-terminal PROCESSING polls (governed by maxChecks)
       const id = setInterval(function () {
-        if (ui.stopped) { clearInterval(id); return; } // dialog closed / cleaned up: stop polling
+        if (ui.stopped) {
+          clearInterval(id);
+          return;
+        } // dialog closed / cleaned up: stop polling
         try {
           const res = https.requestSuitelet({
             scriptId: options.suiteletScriptId,
@@ -145,8 +153,9 @@ define(['N/https'], function (https) {
           options.processedCount = Math.max(0, options.totalCount - options.pendingCount);
           options.percentage = body.percentage;
           if (options.status === 'COMPLETE') options.percentage = 100;
-          options.panes = Array.isArray(body.panes) ? body.panes : (options.panes || []);
-          options.errorMsg = typeof body.errorMsg === 'string' && body.errorMsg ? body.errorMsg : (options.errorMsg || '');
+          options.panes = Array.isArray(body.panes) ? body.panes : options.panes || [];
+          options.errorMsg =
+            typeof body.errorMsg === 'string' && body.errorMsg ? body.errorMsg : options.errorMsg || '';
 
           ui.update(options);
 
@@ -202,11 +211,15 @@ define(['N/https'], function (https) {
       card.innerHTML = `
         <div class="tl-header">
           <div class="tl-title"></div>
-          ${(options.allowMinimize || options.closable) ? `
+          ${
+        options.allowMinimize || options.closable
+          ? `
           <div class="tl-controls">
             ${options.allowMinimize ? '<button type="button" class="tl-btn min-btn" title="Minimize" aria-label="Minimize">\u2500</button>' : ''}
             ${options.closable ? '<button type="button" class="tl-btn close-btn" title="Close" aria-label="Close">\u2715</button>' : ''}
-          </div>` : ''}
+          </div>`
+          : ''
+      }
         </div>
         <div class="tl-body">
           ${options.message ? '<p class="tl-message"></p>' : ''}
@@ -363,7 +376,10 @@ define(['N/https'], function (https) {
 
       // large list: switch to virtualized (windowed) rendering once
       if (!virtual && refs.paneList.length > MAX_ANIMATED) switchToVirtual();
-      if (virtual) { renderVirtual(); return; }
+      if (virtual) {
+        renderVirtual();
+        return;
+      }
 
       if (m === 0) {
         // No new panes this call: refresh the label only while nothing is mid-cascade.
@@ -393,9 +409,13 @@ define(['N/https'], function (https) {
           const row = rows[i];
           if (refs.panesWrap) refs.panesWrap.appendChild(row);
           if (refs.panesCount) refs.panesCount.textContent = 'Count: ' + val;
-          row.addEventListener('animationend', function () {
-            row.classList.add('entered'); // freeze final state; no replay on re-attach
-          }, { once: true });
+          row.addEventListener(
+            'animationend',
+            function () {
+              row.classList.add('entered'); // freeze final state; no replay on re-attach
+            },
+            { once: true }
+          );
         }, delay);
         countTimers.push(t);
       }
@@ -451,8 +471,8 @@ define(['N/https'], function (https) {
       vTo = to;
       vTotal = total;
       // spacers persist, so the content height (total*H) and scrollTop stay stable across scrolls
-      refs.vTop.style.height = (from * H) + 'px';
-      refs.vBot.style.height = ((total - to) * H) + 'px';
+      refs.vTop.style.height = from * H + 'px';
+      refs.vBot.style.height = (total - to) * H + 'px';
       const win = refs.vWin;
       win.innerHTML = ''; // swap only the window rows
       for (let i = from; i < to; i++) {
@@ -522,7 +542,10 @@ define(['N/https'], function (https) {
         refs.panesWrap.removeEventListener('scroll', onVirtualScroll);
         onVirtualScroll = null;
       }
-      if (vRaf) { cancelAnimationFrame(vRaf); vRaf = null; }
+      if (vRaf) {
+        cancelAnimationFrame(vRaf);
+        vRaf = null;
+      }
       vFrom = vTo = vTotal = -1;
       virtual = false;
       refs = {};
@@ -548,7 +571,9 @@ define(['N/https'], function (https) {
     this.close = close;
     this.cleanup = cleanup;
     this._cancelCb = null;
-    this.onCancel = function (fn) { this._cancelCb = fn; };
+    this.onCancel = function (fn) {
+      this._cancelCb = fn;
+    };
   }
 
   /**
