@@ -23,9 +23,21 @@ large lists. Clicking a pane opens the record URL in a new tab.
 
 The module **never navigates or reloads the page on its own** — that's the
 consumer's job. In auto mode `create()` returns a `Promise` you resolve/reject
-against; in manual mode you drive a controller. When the user closes a `closable`
-dialog before completion, the auto `Promise` **rejects** with an `Error` whose
-`err.canceled === true` so you can distinguish a manual cancel from a real failure.
+against; in manual mode you drive a controller. Job outcome and dialog dismissal
+are separate concerns:
+
+- **Outcome** (complete/failed) is delivered by the `Promise` — `.then` on
+  `COMPLETE`, `.catch` on `FAILED`, timeout, or transport error.
+- **Dismissal** (the dialog was closed) is delivered by the `onClose` option — it
+  fires whenever the dialog is closed: the modal `X`, the minimized-widget `X`,
+  a programmatic `close()`, or the ~3s auto-cleanup after COMPLETE/FAILED
+  (`closable:false` + `autoclose:true`). `onClose()` takes no arguments and fires
+  at most once per instance.
+
+Closing a `closable` dialog **before** completion rejects the auto `Promise` with a
+plain `Error` ("Dialog closed before completion.") — there is no `err.canceled`
+flag; treat an early close the same as any other `.catch`. Put close-only logic in
+`onClose`, not in `.catch` (`.catch` also runs on real failures).
 
 ---
 
@@ -42,19 +54,18 @@ nsprogressdialog.create({
   message: 'Please wait while the background job finishes.',
   closable: true,            // show the close ✕ in the title bar (default false)
   allowMinimize: true,       // show the minimize ─ button (default false)
-  data: { param1: param1, param2: param2 }   // POSTed to the Suitelet as body.data
+  data: { param1: param1, param2: param2 },  // POSTed to the Suitelet as body.data
+  onClose: function () {     // fires only on dismissal (modal ✕, mini ✕, or close())
+    console.log('dialog dismissed');
+  }
 })
 .then(function () {
   // COMPLETE - consumer owns navigation
   window.location.reload();
 })
 .catch(function (err) {
-  if (err.canceled) {
-    // user closed the dialog before completion (job may still be running)
-  } else {
-    // real FAILED / timeout / transport error
-    alert(err.message);
-  }
+  // real FAILED / timeout / transport error / user closed before completion
+  alert(err.message);
 });
 ```
 
@@ -96,7 +107,8 @@ loader.close();               // dismiss now (cleanup only; no navigation)
 > `addPanes()` appends and renders record panes but **never changes status or
 > percentage** — it only draws them over whatever state is shown. On success,
 > `<your code>` does the reload/navigate (e.g. `window.location.reload()`), not the
-> module.
+> module. An `onClose` option is honored in manual mode too: it fires when the user
+> closes the dialog (✕) or when you call `loader.close()`.
 
 ---
 
@@ -107,6 +119,7 @@ loader.close();               // dismiss now (cleanup only; no navigation)
 | `title`                | string  | `'Processing...'` | Modal title. |
 | `message`              | string  | `''` | Extra text shown under the header. |
 | `closable`             | boolean | `false` | Show close `✕` in the header and on the minimized widget. Closing just dismisses the dialog (no navigation). |
+| `onClose`              | function | —        | Called when the dialog is dismissed (modal ✕, minimized-widget ✕, programmatic `close()`, or ~3s auto-cleanup). No arguments; fires at most once per instance. |
 | `allowMinimize`        | boolean | `false` | Show minimize `─`. Minimizes to a lower-right live widget; click to re-expand. |
 | `autoclose`            | boolean | `true` | Only meaningful with `closable:false`; auto-cleanup ~3s after COMPLETE/FAILED (no navigation). |
 | `panes`                | array   | `[]` | Initial list of `{ url, text }` record panes (manual mode; auto mode receives them from the Suitelet). |

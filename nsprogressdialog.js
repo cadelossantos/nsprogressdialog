@@ -185,6 +185,7 @@ define(['N/https'], function (https) {
   }
 
   function ProgressDialogUI(options) {
+    const inst = this; // reliable reference to the instance regardless of `this` at call time
     let minimized = false;
     let root = null; // backdrop container (modal)
     let mini = null; // lower-right widget
@@ -199,6 +200,8 @@ define(['N/https'], function (https) {
     let vFrom = -1;
     let vTo = -1;
     let vTotal = -1; // last-rendered virtual window (for unchanged-window skip)
+    let cancelCb = null; // auto-mode reject callback (wired via onCancel)
+    let closeNotified = false; // guards onClose so it fires at most once per instance
 
     function buildModal() {
       root = _el('div', 'tl-backdrop');
@@ -512,18 +515,26 @@ define(['N/https'], function (https) {
     }
 
     function close() {
-      const cb = this._cancelCb;
-      this._cancelCb = null;
+      const cb = cancelCb;
+      cancelCb = null;
       cleanup();
       if (typeof cb === 'function') {
-        const err = new Error('Dialog closed before completion.');
-        err.canceled = true; // consumer marker: distinguish early-close from a real failure
-        cb(err); // rejects the pending create() promise (no-op if already settled)
+        cb(new Error('Dialog closed before completion.')); // rejects the pending create() promise (no-op if already settled)
+      }
+    }
+
+    function notifyClose() {
+      if (closeNotified) return;
+      closeNotified = true;
+      if (typeof options.onClose === 'function') {
+        try {
+          options.onClose();
+        } catch (ignore) {} // a throwing consumer callback must not break dismissal
       }
     }
 
     function cleanup() {
-      this.stopped = true;
+      inst.stopped = true;
       if (root) {
         root.remove();
         root = null;
@@ -550,6 +561,7 @@ define(['N/https'], function (https) {
       virtual = false;
       refs = {};
       activeInstance = null;
+      notifyClose();
     }
 
     function onDragMove(ev) {
@@ -570,9 +582,8 @@ define(['N/https'], function (https) {
     this.stopped = false;
     this.close = close;
     this.cleanup = cleanup;
-    this._cancelCb = null;
     this.onCancel = function (fn) {
-      this._cancelCb = fn;
+      cancelCb = fn;
     };
   }
 

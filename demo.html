@@ -181,16 +181,15 @@
       allowMinimize: true,
       autoclose: false,
       suiteletScriptId: 'customscript_mock',
-      suiteletDeploymentId: 'customdeploy_mock'
+      suiteletDeploymentId: 'customdeploy_mock',
+      onClose: function () {
+        console.log('Dialog closed (onClose) - consumer owns navigation here');
+      }
     }).then(function () {
       window.__autoStep = 99; // stop further mock polls from yielding new panes
       console.log('create() resolved (COMPLETE) - consumer would reload/navigate here');
     }).catch(function (err) {
-      if (err.canceled) {
-        console.warn('Dialog closed early (canceled):', err.message);
-      } else {
-        alert('Auto mode failed: ' + err.message);
-      }
+      alert('Auto mode failed or closed early: ' + err.message);
     });
   }
 
@@ -205,15 +204,14 @@
       allowMinimize: true,
       autoclose: false,
       suiteletScriptId: 'customscript_mock',
-      suiteletDeploymentId: 'customdeploy_mock'
+      suiteletDeploymentId: 'customdeploy_mock',
+      onClose: function () {
+        console.log('Auto failure dialog closed (onClose)');
+      }
     }).then(function () {
       // completion not expected for the failure sequence
     }).catch(function (err) {
-      if (err.canceled) {
-        console.warn('Auto failure dialog closed early (canceled):', err.message);
-      } else {
-        console.log('create() rejected (FAILED):', err.message);
-      }
+      console.log('create() rejected (FAILED or closed early):', err.message);
     });
   }
 
