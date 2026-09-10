@@ -46,6 +46,40 @@ define(['N/https'], function (https) {
     return _checkSvg.cloneNode(true);
   }
 
+  let _closeSvg = null;
+
+  function _buildCloseSvg() {
+    const wrap = document.createElement('span');
+    wrap.innerHTML = `
+      <svg class="tl-close-ico" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30">
+        <path d="M 7 4 C 6.744125 4 6.4879687 4.0974687 6.2929688 4.2929688 L 4.2929688 6.2929688 C 3.9019687 6.6839688 3.9019687 7.3170313 4.2929688 7.7070312 L 11.585938 15 L 4.2929688 22.292969 C 3.9019687 22.683969 3.9019687 23.317031 4.2929688 23.707031 L 6.2929688 25.707031 C 6.6839688 26.098031 7.3170313 26.098031 7.7070312 25.707031 L 15 18.414062 L 22.292969 25.707031 C 22.682969 26.098031 23.317031 26.098031 23.707031 25.707031 L 25.707031 23.707031 C 26.098031 23.316031 26.098031 22.682969 25.707031 22.292969 L 18.414062 15 L 25.707031 7.7070312 C 26.098031 7.3170312 26.098031 6.6829688 25.707031 6.2929688 L 23.707031 4.2929688 C 23.316031 3.9019687 22.682969 3.9019687 22.292969 4.2929688 L 15 11.585938 L 7.7070312 4.2929688 C 7.5115312 4.0974687 7.255875 4 7 4 z"></path>
+      </svg>
+    `;
+    return wrap.children[0];
+  }
+
+  function _closeIcon() {
+    if (!_closeSvg) _closeSvg = _buildCloseSvg();
+    return _closeSvg.cloneNode(true);
+  }
+
+  let _minSvg = null;
+
+  function _buildMinSvg() {
+    const wrap = document.createElement('span');
+    wrap.innerHTML = `
+      <svg class="tl-min-ico" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <path style="fill:currentColor;stroke:currentColor;stroke-width:4;" d="m 20,50 60,0 0,10 -60,0 z"/>
+      </svg>
+    `;
+    return wrap.children[0];
+  }
+
+  function _minIcon() {
+    if (!_minSvg) _minSvg = _buildMinSvg();
+    return _minSvg.cloneNode(true);
+  }
+
   function _injectStyles() {
     if (document.getElementById('tl_styles')) return;
     const style = _el('style');
@@ -64,10 +98,12 @@ define(['N/https'], function (https) {
       .tl-card { width: 420px; max-width: 92vw; border-radius: var(--tl-radius); background: #fff; box-shadow: 0 20px 50px rgba(0,0,0,.35); overflow: hidden; }
 
       .tl-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #e5e7eb; background: #607799; cursor: move; }
-      .tl-title { font-size: 12px; font-weight: 600; color: white; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .tl-title { font-size: 12px; font-weight: 600; color: white; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .tl-controls { display: flex; gap: 6px; flex: none; }
-      .tl-btn { width: 24px; height: 24px; border-radius: 0; border: 1px solid transparent; background: transparent; color: white; font-size: 16px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, border-color .15s; }
+      .tl-btn { width: 24px; height: 24px; padding: 2px 2px; border-radius: 0; border: 1px solid transparent; background: transparent; color: white; font-size: 16px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, border-color .15s; }
       .tl-btn:hover { background: #eef2f7; border-color: #d1d5db; color: #111827; }
+      .tl-btn .tl-close-ico { width: 12px; height: 12px; display: block; }
+      .tl-btn .tl-min-ico { width: 12px; height: 12px; display: block; }
 
       .tl-body { padding: 16px; }
       .tl-message { margin: 0 0 12px; font-size: 12px; color: #374151; }
@@ -94,6 +130,7 @@ define(['N/https'], function (https) {
       .tl-mini-bar.tl-fail { background: var(--tl-fail); animation: none; }
       .tl-mini-close { position: absolute; top: 8px; right: 8px; width: 20px; height: 20px; border: none; background: transparent; color: #9ca3af; font-size: 16px; line-height: 1; cursor: pointer; padding: 0; border-radius: 0; display: flex; align-items: center; justify-content: center; }
       .tl-mini-close:hover { background: #eef2f7; color: #111827; }
+      .tl-mini-close .tl-close-ico { width: 12px; height: 12px; display: block; }
 
       .tl-panes { max-height: 160px; overflow-y: auto; }
       .tl-panes-area { margin-top: 12px; }
@@ -218,8 +255,8 @@ define(['N/https'], function (https) {
         options.allowMinimize || options.closable
           ? `
           <div class="tl-controls">
-            ${options.allowMinimize ? '<button type="button" class="tl-btn min-btn" title="Minimize" aria-label="Minimize">\u2500</button>' : ''}
-            ${options.closable ? '<button type="button" class="tl-btn close-btn" title="Close" aria-label="Close">\u2715</button>' : ''}
+            ${options.allowMinimize ? '<button type="button" class="tl-btn min-btn" title="Minimize" aria-label="Minimize"></button>' : ''}
+            ${options.closable ? '<button type="button" class="tl-btn close-btn" title="Close" aria-label="Close"></button>' : ''}
           </div>`
           : ''
       }
@@ -255,6 +292,8 @@ define(['N/https'], function (https) {
 
       if (options.message) card.querySelector('.tl-message').textContent = options.message;
       card.querySelector('.tl-title').textContent = options.title;
+      if (options.allowMinimize) card.querySelector('.min-btn').appendChild(_minIcon());
+      if (options.closable) card.querySelector('.close-btn').appendChild(_closeIcon());
 
       // drag the modal by its header (ignore clicks on the min/close controls)
       card.querySelector('.tl-header').addEventListener('mousedown', function (ev) {
@@ -280,11 +319,12 @@ define(['N/https'], function (https) {
       mini.innerHTML = `
         <div class="tl-mini-label"></div>
         <div class="tl-mini-track"><div class="tl-mini-bar" style="width:0%"></div></div>
-        ${options.closable ? '<button type="button" class="tl-mini-close" aria-label="Close">\u2715</button>' : ''}
+        ${options.closable ? '<button type="button" class="tl-mini-close" aria-label="Close"></button>' : ''}
       `;
       mini.addEventListener('click', restore);
       mini.querySelector('.tl-mini-label').textContent = options.title;
       refs.miniBarInner = mini.querySelector('.tl-mini-bar');
+      if (options.closable) mini.querySelector('.tl-mini-close').appendChild(_closeIcon());
 
       // small close on the widget (only when closable)
       if (options.closable) {
